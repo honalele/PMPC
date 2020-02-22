@@ -24,7 +24,7 @@ import math
 import numpy as np
 import csv
 import matplotlib.pyplot as plt
-import controller2d
+import mpc_controller
 import configparser 
 
 # Script level imports
@@ -351,7 +351,7 @@ def exec_waypoint_nav_demo(args):
         #############################################
         # This is where we take the controller2d.py class
         # and apply it to the simulator
-        controller = controller2d.Controller2D(waypoints)
+        controller = mpc_controller.ModelPredictiveController(waypoints)
 
         #############################################
         # Determine simulation average timestep (and total frames)
