@@ -152,7 +152,7 @@ surr_vehicle_data = []
 collision_data = []
 show_animation = True
 show_result = True
-MAX_TIME = 100
+MAX_TIME = 500
 
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
@@ -1103,6 +1103,9 @@ def game_loop(args):
     pygame.init()
     pygame.font.init()
     world = None
+    dl = 1.0
+    
+
 
     try:
         client = carla.Client(args.host, args.port)
@@ -1119,24 +1122,29 @@ def game_loop(args):
         map = town.get_map()
         town_map = get_town_map(map)
 
-        if args.controller == 'keyboard':
-            controller = KeyboardControl(world, args.autopilot)
-        elif args.controller == 'mpc':
-            controller = MPCcontroller(world, args.target_speed)
-
         clock = pygame.time.Clock()
         time_step = 0
         trajectory, goal = get_straight_trajectory(town_map)
-        print(trajectory.head(5))
+        cx, cy, cyaw, ck = get_mpc_course(trajectory, dl=1.0)
+        sp = calc_speed_profile(cx, cy, cyaw, args.target_speed)
+        initial_state = State(x=cx[0], y=cy[0], yaw=cyaw[0], v=0.0)
+        mpc_state = [cx, cy, cyaw, ck, sp, dl, initial_state]
+
+
+        if args.controller == 'keyboard':
+            controller = KeyboardControl(world, args.autopilot)
+        elif args.controller == 'mpc':
+            controller = MPCcontroller(world, args.target_speed, initial_state)
+
         while True and time_step <= MAX_TIME:
-        	time_step += 1
+            time_step += 1
             clock.tick_busy_loop(60)
             if args.controller == 'keyboard':
             	controller.parse_events(client, world, clock)
             	return
             elif args.controller == 'mpc':
-            	print('time step: {}'.format(clock.get_time()))
-            	controller.control(client, world, clock, trajectory, goal)
+            	print('time step: {}'.format(time_step))
+            	controller.control(client, world, clock, trajectory, goal, mpc_state)
 
             world.tick(clock)
             world.render(display)
@@ -1150,6 +1158,71 @@ def game_loop(args):
 
         pygame.quit()
  
+
+
+class State:
+    def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
+        self.v = v
+        self.predelta = None
+
+
+def calc_speed_profile(cx, cy, cyaw, target_speed):
+
+    speed_profile = [target_speed] * len(cx)
+    direction = 1.0  # forward
+    # Set stop point
+    for i in range(len(cx) - 1):
+        dx = cx[i + 1] - cx[i]
+        dy = cy[i + 1] - cy[i]
+        move_direction = math.atan2(dy, dx)
+        if dx != 0.0 and dy != 0.0:
+            dangle = abs(pi_2_pi(move_direction - cyaw[i]))
+            if dangle >= math.pi / 4.0:
+                direction = -1.0
+            else:
+                direction = 1.0
+        if direction != 1.0:
+            speed_profile[i] = - target_speed
+        else:
+            speed_profile[i] = target_speed
+    speed_profile[-1] = 0.0
+    return speed_profile
+    
+def pi_2_pi(angle):
+    while(angle > math.pi):
+        angle = angle - 2.0 * math.pi
+
+    while(angle < -math.pi):
+        angle = angle + 2.0 * math.pi
+
+    return angle
+
+def check_goal(state, goal, tind, nind):
+    # check goal
+    dx = state.x - goal[0]
+    dy = state.y - goal[1]
+    d = math.hypot(dx, dy)
+    isgoal = (d <= GOAL_DIS)
+    if abs(tind - nind) >= 5:
+        isgoal = False
+
+    isstop = (abs(state.v) <= STOP_SPEED)
+
+    if isgoal and isstop:
+        return True
+    return False
+
+
+def get_mpc_course(trajectory, dl=1.0):
+    ax = trajectory['x']
+    ay = trajectory['y']
+    cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
+        ax, ay, ds=dl)
+
+    return cx, cy, cyaw, ck
 
 def get_straight_trajectory(town_map):
 	n_point, _ = town_map.shape
