@@ -5,6 +5,7 @@ from __future__ import print_function
 import glob
 import os
 import sys
+import seaborn as sns
 sys.path.append("../CubicSpline/")
 
 try:
@@ -45,6 +46,8 @@ import re
 import weakref
 import pandas as pd
 import cvxpy
+import csv
+from pylab import rcParams
 
 
 import matplotlib.pyplot as plt
@@ -99,7 +102,9 @@ except ImportError:
 # -- Pesonalized Data-driven Control ---------------------------------------
 # ========================================-======================================
 
-
+markers =[',', 'o', 'v', '^', '<', '>', '1', '2', '3','4', '8', 's', 'p', '*', 'h', 'H', '+', 'x']
+vvv= 0
+ddd = []
 show_animation = True
 class State:
     def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0):
@@ -109,6 +114,7 @@ class State:
         self.v = v
         self.predelta = None
 
+d = []
 class MPCcontroller(object):
     """Class that handles keyboard input."""
     def __init__(self, world, target_speed, initial_state):
@@ -117,7 +123,7 @@ class MPCcontroller(object):
         self.initial_state = initial_state
 
         self.NX = 4
-        self.NU = 3
+        self.NU = 2
         self.T = 5
 
         self.R = np.diag([0.01, 0.01]) # input cost function
@@ -127,19 +133,19 @@ class MPCcontroller(object):
 
         # iterative parameter
         self.MAX_ITER = 3 
-        self.DU_TH = 0.1
+        self.DU_TH = 1
         self.DT = 0.2 #s
         self.WB = 2.5 #m
-        self.N_IND_SEARCH = 10 # Search index number
-        self.dl = 1.0  # course tick
-        self.MAX_TIME = 100
+        self.N_IND_SEARCH = 200 # Search index number
+        self.dl = 0.2 # course tick
+        self.MAX_TIME = 5
 
         # CONSTRAINTS
         self.MAX_STEER = 1.0
         self.MAX_DSTEER = 0.1
-        self.MAX_SPEED = 120 #km/h
+        self.MAX_SPEED = 100  #km/h
         self.MIN_SPEED = 0 # km/h
-        self.MAX_ACCEL = 0.5
+        self.MAX_ACCEL = 0.9
 
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
@@ -291,34 +297,57 @@ class MPCcontroller(object):
                     world.player.set_light_state(carla.VehicleLightState(self._lights))
             elif isinstance(self._control, carla.WalkerControl):
                 self._parse_walker_keys(pygame.key.get_pressed(), clock.get_time(), world)
+
+            #control(self, client, world, clock, trajectory, goal, mpc_state):
         
             t = world.player.get_transform()
             v = world.player.get_velocity()
             c = world.player.get_control()
+            surr_vel_num = 0
+            surr_vel_dis = []
+            surr_vel_v = []
 
             vehicles = world.world.get_actors().filter('vehicle.*')
             distance = lambda l: math.sqrt((l.x - t.location.x)**2 + (l.y - t.location.y)**2 + (l.z - t.location.z)**2)
-            vehicles = [(distance(sur.get_lorcation()), surr) for surr in vehicles if surr.id != world.player.id]
+            vehicles = [(distance(surr.get_location()), surr) for surr in vehicles if surr.id != world.player.id]
+            for d, vehicle in sorted(vehicles, key=lambda vehicles: vehicles[0]):
+                if d > 50.0:
+                    break
+                else:
+                    surr_vel_num += 1
+                    surr_v = vehicle.get_velocity()
+                    surr_vel_dis.append(vehicle.get_location())
+                    surr_vel_v.append(3.6 * math.sqrt(surr_v.x**2 + surr_v.y**2 + surr_v.z**2))
 
-            [cx, cy, cyaw, ck, sp, dl, initial_state] = mpc_state
-
-            print(len(cx))
-
-            state = initial_state
+            [cx, cy, cyaw, ck, sp, dl, time_step, state]= mpc_state
             # initial yaw compensation
+
+            state.x = t.location.x
+            state.y = t.location.y
+            state.v = math.sqrt(v.x**2 + v.y**2 + v.z**2)
+            state.yaw = t.rotation.yaw
+
+            print(state.yaw)
             if state.yaw - cyaw[0] >= math.pi:
                 state.yaw -= math.pi * 2.0
             elif state.yaw - cyaw[0] <= -math.pi:
                 state.yaw += math.pi * 2.0
 
-            time = 0.0
+            c_a = c.throttle #0.0, 1.0
+            c_delta = c.steer #-1.0, +1.0
+            c_b = c.brake #0.0, 1.0
+            if np.abs(c_a) >= np.abs(c_b):
+                a = c_a 
+            else:
+                a = c_b
+
+            time = 0
             xx = [state.x]
             yy = [state.y]
             yyaw = [state.yaw]
             vv = [state.v]
-            tt = [0.0]
-            dd = [0.0]
-            aa = [0.0]
+            dd = [0]
+            aa = [0]
             target_ind, _ = self._calc_nearest_index(state, cx, cy, cyaw, 0)
 
             odelta, oa = None, None
@@ -334,45 +363,78 @@ class MPCcontroller(object):
                 if odelta is not None:
                     di, ai = odelta[0], oa[0]
                     state = self._update_state(state, ai, di)
-                time = time + DT
+                time = time + self.DT
                 xx.append(state.x)
                 yy.append(state.y)
                 yyaw.append(state.yaw)
                 vv.append(state.v)
-                tt.append(time)
-                dd.append(di)
+                dd.append(di/180)
                 aa.append(ai)
+
                 if ai > 0:
-                    self._control.throttle = ai
+                    self._control.throttle = np.abs(ai)
                     self._control.brake = 0
                 else:
                     self._control.throttle =0 
-                    self._control.brake = ai
+                    self._control.brake = np.abs(ai)
+                """
+                if np.abs(di*np.pi/180) > 0.2:
+                    self._control.steer = -di
+                else:
+                    self._control.steer = di*np.pi/180
+                #if time > 120 and time <140:
+                #    self._control.steer = -0.2 
+                """
+                self._control.steer = -di/180
 
-                self._control.steer = di
+
                 world.player.apply_control(self._control)
+                time_step = time_step + time
 
                 if self._check_goal(state, goal, target_ind, len(cx)):
+                    self._control.throttle =0 
+                    self._control.brake = 1.0
+
                     print("Goal")
                     break
 
                 if show_animation:  # pragma: no cover
+                    selected_x = trajectory['x']
+                    selected_y = trajectory['y']
+                    plt.rcParams['figure.figsize'] = 4,7
+                    plt.rcParams['font.size'] = 14
+                    plt.style.use('seaborn-dark')
+
                     plt.cla()
                     # for stopping simulation with the esc key.
                     plt.gcf().canvas.mpl_connect('key_release_event',
                         lambda event: [exit(0) if event.key == 'escape' else None])
                     if ox is not None:
-                        plt.plot(ox, oy, "xr", label="MPC")
-                    plt.plot(cx, cy, "-r", label="course")
-                    plt.plot(xx, yy, "ob", label="trajectory")
-                    plt.plot(xref[0, :], xref[1, :], "xk", label="xref")
-                    plt.plot(cx[target_ind], cy[target_ind], "xg", label="target")
-                    plot_car(state.x, state.y, state.yaw, steer=di)
-                    plt.axis("equal")
+                        plt.plot(oy, ox, "xr", label="pred_traj.")
+                    #plt.plot(selected_x, selected_y, color='gray', label="Lane change trajectory", linewidth=2)
+                    plt.plot(cy, cx, color='gray', label="plan_traj.", linewidth=5)
+                    #plt.plot(xx, yy, "ob", label="trajectory")
+                    plt.plot(xref[1, :], xref[0, :], "ob", label="ref_traj.")
+                    plt.plot(cy[target_ind], cx[target_ind], "xg", label="target")
+                    #plot_car(state.y, state.x, state.yaw, steer=di)
+                    plt.plot(state.y, state.x,  "*r", markersize=20)
+                    plt.text(state.y+2, state.x, 'ego')
+                    plt.text(state.y+7, state.x, str(state.v*3.6)[:5]+'[km/h]')
+                    for j in range(surr_vel_num):
+                        surr_vel = surr_vel_dis[j]
+                        surr_num = 'surr_{}'.format(j+1)
+                        plt.plot(surr_vel.y, surr_vel.x, marker=markers[j], color='k', label=surr_num, markersize=5)
+                        plt.text(surr_vel.y+5,surr_vel.x, str(surr_vel_v[j]*3.6)[:5])
+
+                    plt.xlim(-0, 35)
+                    plt.ylim(-400, 15)
                     plt.grid(True)
-                    plt.title("Time[s]:" + str(round(time, 2))
+                    plt.legend(loc="upper right")
+                    plt.title("Time[s]:" + str(round(time_step, 2))
                         + ", speed[km/h]:" + str(round(state.v * 3.6, 2)))
                     plt.pause(0.0001)
+
+            return xx, yy, yyaw, vv, dd, aa, time_step, state
             
 
     def _check_goal(self, state, goal, tind, nind):
@@ -380,9 +442,7 @@ class MPCcontroller(object):
         dx = state.x - goal[0]
         dy = state.y - goal[1]
         d = math.hypot(dx, dy)
-
         isgoal = (d <= 1)
-
         if abs(tind - nind) >= 5:
             isgoal = False
         isstop = (abs(state.v) <= 2)
@@ -668,7 +728,7 @@ WHEEL_LEN = 0.3  # [m]
 WHEEL_WIDTH = 0.2  # [m]
 TREAD = 0.7  # [m]
 WB = 2.5  # [m]
-def plot_car(x, y, yaw, steer=0.0, cabcolor="-r", truckcolor="-k"):  # pragma: no cover
+def plot_car(y, x, yaw, steer=0.0, cabcolor="-r", truckcolor="-k"):  # pragma: no cover
 
     outline = np.array([[-BACKTOWHEEL, (LENGTH - BACKTOWHEEL), (LENGTH - BACKTOWHEEL), -BACKTOWHEEL, -BACKTOWHEEL],
                         [WIDTH / 2, WIDTH / 2, - WIDTH / 2, -WIDTH / 2, WIDTH / 2]])
@@ -700,16 +760,16 @@ def plot_car(x, y, yaw, steer=0.0, cabcolor="-r", truckcolor="-k"):  # pragma: n
     rr_wheel = (rr_wheel.T.dot(Rot1)).T
     rl_wheel = (rl_wheel.T.dot(Rot1)).T
 
-    outline[0, :] += x
-    outline[1, :] += y
-    fr_wheel[0, :] += x
-    fr_wheel[1, :] += y
-    rr_wheel[0, :] += x
-    rr_wheel[1, :] += y
-    fl_wheel[0, :] += x
-    fl_wheel[1, :] += y
-    rl_wheel[0, :] += x
-    rl_wheel[1, :] += y
+    outline[0, :] += y
+    outline[1, :] += x
+    fr_wheel[0, :] += y
+    fr_wheel[1, :] += x
+    rr_wheel[0, :] += y
+    rr_wheel[1, :] += x
+    fl_wheel[0, :] += y
+    fl_wheel[1, :] += x
+    rl_wheel[0, :] += y
+    rl_wheel[1, :] += x
 
     plt.plot(np.array(outline[0, :]).flatten(),
              np.array(outline[1, :]).flatten(), truckcolor)
@@ -721,4 +781,4 @@ def plot_car(x, y, yaw, steer=0.0, cabcolor="-r", truckcolor="-k"):  # pragma: n
              np.array(fl_wheel[1, :]).flatten(), truckcolor)
     plt.plot(np.array(rl_wheel[0, :]).flatten(),
              np.array(rl_wheel[1, :]).flatten(), truckcolor)
-    plt.plot(x, y, "*")
+    plt.plot(y, x, "*")

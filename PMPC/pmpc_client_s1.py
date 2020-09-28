@@ -93,6 +93,7 @@ import re
 import weakref
 import pandas as pd
 import pickle
+import csv
 
 import matplotlib.pyplot as plt
 from scipy.interpolate import splprep, splev
@@ -150,9 +151,10 @@ markers =[',', 'o', 'v', '^', '<', '>', '1', '2', '3','4', '8', 's', 'p', '*', '
 ego_vehicle_data = []
 surr_vehicle_data = []
 collision_data = []
-show_animation = True
+show_animation = False
 show_result = True
-MAX_TIME = 500
+vv = []
+dd = []
 
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
@@ -935,6 +937,7 @@ class HUD(object):
         vehicles = world.world.get_actors().filter('vehicle.*')
         surr_vel_num = 0
         surr_vel_dis = []
+        surr_vel_v = []
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
@@ -987,7 +990,9 @@ class HUD(object):
                     break
                 else:
                     surr_vel_num += 1
+                    surr_v = vehicle.get_velocity()
                     surr_vel_dis.append(vehicle.get_location())
+                    surr_vel_v.append(3.6 * math.sqrt(surr_v.x**2 + surr_v.y**2 + surr_v.z**2))
                 vehicle_type = get_actor_display_name(vehicle, truncate=22)
                 self._info_text.append('% 4dm %s' % (d, vehicle_type))
                 
@@ -1000,6 +1005,8 @@ class HUD(object):
         delta = c.steer
         b = c.brake
         ego_speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2) #km/h
+        vv.append(ego_speed)
+        dd.append(delta)
         lat = world.gnss_sensor.lat
         lon = world.gnss_sensor.lon
 
@@ -1038,7 +1045,8 @@ class HUD(object):
                 for j in range(surr_vel_num):
                     surr_vel = surr_vel_dis[j]
                     surr_num = 'Other #{}'.format(j+1)
-                    plt.plot(-surr_vel.x, surr_vel.y, marker=markers[j], color='k', label=surr_num, markersize=5)
+                    plt.plot(surr_vel.x, surr_vel.y, marker=markers[j], color='k', label=surr_num, markersize=5)
+                    plt.text(surr_vel.x-5,surr_vel.y, str(surr_vel_v[j]))
             #plt.axis("equal")
             plt.grid(True)
             plt.xlim(-450,500)
@@ -1103,8 +1111,8 @@ def game_loop(args):
     pygame.init()
     pygame.font.init()
     world = None
-    dl = 1.0
-    
+    dl = 1
+    MAX_TIME = 500
 
 
     try:
@@ -1125,10 +1133,11 @@ def game_loop(args):
         clock = pygame.time.Clock()
         time_step = 0
         trajectory, goal = get_straight_trajectory(town_map)
-        cx, cy, cyaw, ck = get_mpc_course(trajectory, dl=1.0)
+        cx, cy, cyaw, ck = get_mpc_course(trajectory, dl)
+        print('Points of mpc route: {}'.format(len(cx)))
         sp = calc_speed_profile(cx, cy, cyaw, args.target_speed)
         initial_state = State(x=cx[0], y=cy[0], yaw=cyaw[0], v=0.0)
-        mpc_state = [cx, cy, cyaw, ck, sp, dl, initial_state]
+        mpc_state = [cx, cy, cyaw, ck, sp, dl, time_step, initial_state]
 
 
         if args.controller == 'keyboard':
@@ -1137,25 +1146,43 @@ def game_loop(args):
             controller = MPCcontroller(world, args.target_speed, initial_state)
 
         while True and time_step <= MAX_TIME:
-            time_step += 1
             clock.tick_busy_loop(60)
             if args.controller == 'keyboard':
             	controller.parse_events(client, world, clock)
             	return
             elif args.controller == 'mpc':
             	print('time step: {}'.format(time_step))
-            	controller.control(client, world, clock, trajectory, goal, mpc_state)
 
+            	xx, yy, yyaw, vvv, ddd, aa, time_step, current_state = \
+            	controller.control(client, world, clock, trajectory, goal, mpc_state)
+            	vv.append(vvv)
+            	dd.append(ddd)
+
+
+            	if check_goal(current_state, goal):
+            		print('Reached goal!')
+            		
+
+            	else:
+            		mpc_state = [cx, cy, cyaw, ck, sp, dl, time_step, current_state]
+
+            	if time_step > 68 and time_step<100:
+            		with open('../output/csv/naren1_v.csv', 'w') as f:
+            			 writer = csv.writer(f, lineterminator='\n') 
+            			 writer.writerow(vv)     #
+
+            		with open('../output/csv/naren1_d.csv', 'w') as f:
+            			 writer = csv.writer(f, lineterminator='\n') 
+            			 writer.writerow(dd)
+            
             world.tick(clock)
             world.render(display)
             pygame.display.flip()
     finally:       
         if (world and world.recording_enabled):
             client.stop_recorder()
-
         if world is not None:
             world.destroy()
-
         pygame.quit()
  
 
@@ -1170,7 +1197,6 @@ class State:
 
 
 def calc_speed_profile(cx, cy, cyaw, target_speed):
-
     speed_profile = [target_speed] * len(cx)
     direction = 1.0  # forward
     # Set stop point
@@ -1190,44 +1216,44 @@ def calc_speed_profile(cx, cy, cyaw, target_speed):
             speed_profile[i] = target_speed
     speed_profile[-1] = 0.0
     return speed_profile
+
+
     
 def pi_2_pi(angle):
     while(angle > math.pi):
         angle = angle - 2.0 * math.pi
-
     while(angle < -math.pi):
         angle = angle + 2.0 * math.pi
-
     return angle
 
-def check_goal(state, goal, tind, nind):
+
+
+def check_goal(state, goal):
     # check goal
+    GOAL_DIS = 1
     dx = state.x - goal[0]
     dy = state.y - goal[1]
     d = math.hypot(dx, dy)
     isgoal = (d <= GOAL_DIS)
-    if abs(tind - nind) >= 5:
-        isgoal = False
-
-    isstop = (abs(state.v) <= STOP_SPEED)
-
-    if isgoal and isstop:
-        return True
-    return False
+    if d <= GOAL_DIS:
+        isgoal = True
+    else:
+    	isgoal = False
+    return isgoal
 
 
-def get_mpc_course(trajectory, dl=1.0):
+def get_mpc_course(trajectory, dl):
     ax = trajectory['x']
     ay = trajectory['y']
     cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
         ax, ay, ds=dl)
-
     return cx, cy, cyaw, ck
 
 def get_straight_trajectory(town_map):
 	n_point, _ = town_map.shape
 	FINAL_x = -5
-	print(n_point)
+	LANE_CHANGE_x = -150
+	print('Points of town: {}'.format(n_point))
 	trajectory_x = []
 	trajectory_y = []
 
@@ -1240,24 +1266,26 @@ def get_straight_trajectory(town_map):
 	selected_x = []
 	selected_y = []
 	for j in range(len(trajectory_x)):
-		if trajectory_x[j] > -370 and trajectory_x[j] < 0 and trajectory_y[j] < 7 and trajectory_y[j] > 5:
+		if trajectory_x[j] > -370 and trajectory_x[j] < LANE_CHANGE_x and trajectory_y[j] < 7 and trajectory_y[j] > 5:
 			selected_x.append(trajectory_x[j])
 			selected_y.append(trajectory_y[j])
-		elif trajectory_x[j] > 0 and trajectory_x[j] < FINAL_x and trajectory_y[j] < 10 and trajectory_y[j]>7.5 :
+		elif trajectory_x[j] > LANE_CHANGE_x and trajectory_x[j] < FINAL_x and trajectory_y[j] < 10 and trajectory_y[j]>7.5 :
 			selected_x.append(trajectory_x[j])
 			selected_y.append(trajectory_y[j])
 		else:
 			pass
 
+	selected_x = np.sort(selected_x)
+	selected_y = np.sort(selected_y)
 	start_x = np.min(selected_x)
 	start_y = np.min(selected_y)
 	end_x = np.max(selected_x)
 	end_y = np.max(selected_y)
 	print('start_x, start_y is {}, {}'.format(start_x, start_y))
-	print('Selected trajectory1: {}'.format(len(trajectory_x)))
+	print('Points of selected lane change route: {}'.format(len(selected_x)))
 
 	plt.figure(figsize=(15, 7))
-	plt.rcParams['font.size'] = 14
+	plt.rcParams['font.size'] = 20
 	#plt.scatter(town_map.x, town_map.y, color='gray', label="Town04", linewidth=0.1)
 	plt.scatter(trajectory_x, trajectory_y, color='gray', marker='.', label="Town map", linewidth=0.1)
 	plt.plot(selected_x, selected_y, "r.", label="Lane change trajectory", linewidth=0.1)
@@ -1273,10 +1301,10 @@ def get_straight_trajectory(town_map):
 	filename = '../output/fig/6_trajectory_zoom_details.png'
 	#plt.savefig(filename)
 	plt.show()
-
 	trajectory = pd.DataFrame({'x':selected_x,'y':selected_y})
-
 	return trajectory, [end_x, end_y]
+
+
 
 def get_town_map(map):
     ROADNETWORK_RES = 1 # [m]
@@ -1299,6 +1327,7 @@ def get_town_map(map):
 # -- main() --------------------------------------------------------------------
 # ==============================================================================
 
+dd_all = []
 def main():
     argparser = argparse.ArgumentParser(
         description='CARLA Manual Control Client')
@@ -1407,12 +1436,18 @@ def main():
         game_loop(args)
         
     except KeyboardInterrupt:
-        print('\nCancelled by user. Bye!')
+    	print('\nvv {}\n'.format(vv))
+    	print('\ndd {}\n'.format(dd))
+    	print('\nCancelled by user. Bye!')
+
+
+
 
     client = carla.Client(args.host, args.port)
     town = client.get_world()
     map = town.get_map()
     town_map = get_town_map(map)
+    
 
     #ego_vehicle_data_t = [x, y, theta, alpha ,delta, b, ego_speed, lat, lon] 
     if len(ego_vehicle_data) > 0 and show_result:
@@ -1432,9 +1467,9 @@ def main():
     		v.append(ego_vehicle_data[i][6])
     		delta.append(ego_vehicle_data[i][4])
 
-    	plt.figure()
+    	plt.figure(figsize=(10,10))
     	plt.scatter(town_map.x, town_map.y,color='gray', label="Town04", linewidth=0.5)
-    	plt.plot(x[5:-5], y[5:-5], "r.", label="Trajectory", linewidth=1)
+    	plt.plot(x[5:-5], y[5:-5], "ro", label="Trajectory", linewidth=2,markersize=5)
     	plt.plot(x[0], y[0], "g*", label="Start point", markersize=7)
     	plt.plot(x[-1], y[-1], "bv", label="End point", markersize=7)
     	plt.legend(loc="lower left")
@@ -1443,7 +1478,7 @@ def main():
     	plt.savefig(filename)
     	plt.show()
 
-    	plt.figure()
+    	plt.figure(figsize=(10,5))
     	plt.plot(v, "r.", linewidth=1)
     	plt.title('PMPC velocity. Participant: {}, Episode: #{}'.format(args.participant, args.num_episodes))
     	filename2 = '../output/fig/pmpc_velocity_' + args.participant + '_' + str(args.num_episodes) + '.png'
@@ -1452,7 +1487,7 @@ def main():
     	plt.savefig(filename2)
     	plt.show()
 
-    	plt.figure()
+    	plt.figure(figsize=(10,5))
     	plt.plot(delta, "b.", linewidth=1)
     	plt.title('PMPC steering angle. Participant: {}, Episode: #{}'.format(args.participant, args.num_episodes))
     	filename3 = '../output/fig/pmpc_steering_' + args.participant + '_' + str(args.num_episodes) + '.png'
